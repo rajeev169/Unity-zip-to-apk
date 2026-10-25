@@ -1,0 +1,87 @@
+name: Unity ZIP to APK
+
+# Upload a Unity project zip to this repo (any name ending in .zip).
+# This workflow unzips it, builds an Android APK with GameCI and
+# attaches the APK to the run as "Unity-APK".
+#
+# Needs these repo secrets (Settings > Secrets and variables > Actions):
+#   UNITY_LICENSE   - full text of your Unity_lic.ulf file
+#   UNITY_EMAIL     - your Unity account email
+#   UNITY_PASSWORD  - your Unity account password
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.zip'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space (Unity Android image is large)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Unzip the latest Unity project
+        id: unzip
+        run: |
+          ZIP=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -i '\.zip$' | head -n1 || true)
+          if [ -z "$ZIP" ]; then ZIP=$(ls -t *.zip 2>/dev/null | head -n1); fi
+          if [ -z "$ZIP" ]; then echo "No .zip file found in the repo"; exit 1; fi
+          echo "Using zip: $ZIP"
+          rm -rf unity_project && mkdir unity_project
+          unzip -q "$ZIP" -d unity_project
+          VER=$(find unity_project -path '*/ProjectSettings/ProjectVersion.txt' | head -n1)
+          if [ -z "$VER" ]; then echo "This zip is not a Unity project (no ProjectSettings/ProjectVersion.txt)"; exit 1; fi
+          ROOT=$(dirname "$(dirname "$VER")")
+          echo "Unity project folder: $ROOT"
+          cat "$VER"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          F=$(grep -rlE 'public static void BuildAndroid' "$ROOT/Assets" --include=*.cs | head -n1 || true)
+          if [ -n "$F" ]; then
+            CLS=$(basename "$F" .cs)
+            echo "method=$CLS.BuildAndroid" >> "$GITHUB_OUTPUT"
+            echo "Build method: $CLS.BuildAndroid"
+          else
+            echo "Build method: GameCI default"
+          fi
+
+      - name: Cache Unity Library
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.unzip.outputs.root }}/Library
+          key: Library-Android-${{ hashFiles('unity_project/**/Packages/manifest.json', 'unity_project/**/ProjectSettings/ProjectVersion.txt') }}
+          restore-keys: Library-Android-
+
+      - name: Build Android APK
+        uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          projectPath: ${{ steps.unzip.outputs.root }}
+          targetPlatform: Android
+          buildMethod: ${{ steps.unzip.outputs.method }}
+          buildName: Game
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Unity-APK
+          path: build/Android
+          if-no-files-found: error
